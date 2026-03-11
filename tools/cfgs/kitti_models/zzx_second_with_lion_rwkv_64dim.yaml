@@ -66,6 +66,7 @@ MODEL:
     USE_ABSLOTE_XYZ: True
     USE_NORM: True
     NUM_FILTERS: [64, 64]
+    TARGET_CLASS_NAMES: [ ]  # 只对这三类生成前景地图
 
   BACKBONE_3D:
     NAME: ZZXDF_LION
