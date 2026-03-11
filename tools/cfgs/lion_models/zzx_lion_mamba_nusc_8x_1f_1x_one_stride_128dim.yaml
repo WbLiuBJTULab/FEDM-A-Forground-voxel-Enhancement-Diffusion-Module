@@ -54,20 +54,16 @@ DATA_CONFIG:
           'test': True
         }
 
-    - NAME: transform_points_to_voxels
+    -   NAME: transform_points_to_voxels_placeholder
+        VOXEL_SIZE: [0.3, 0.3, 0.25]
+
+    # === 新增真值框体素地图生成步骤 ===
+    - NAME: generate_gt_voxel_maps
       VOXEL_SIZE: [ 0.3, 0.3, 0.25 ]
       MAX_POINTS_PER_VOXEL: 10
-      MAX_NUMBER_OF_VOXELS: {
-        'train': 60000,
-        'test': 60000
-      }
-
-    # 新增：真值框体素地图生成处理器
-    - NAME: generate_gt_voxel_map
-      VOXEL_SIZE: [ 0.3, 0.3, 0.25 ]  # 与transform_points_to_voxels保持一致
-      MAX_POINTS_PER_VOXEL: 10  # 与transform_points_to_voxels保持一致
-      MAX_NUMBER_OF_VOXELS: 60000
-      
+      MAX_NUMBER_OF_VOXELS:
+          'train': 60000
+          'test': 60000
 
 MODEL:
     # === 更改detector ===
@@ -80,6 +76,13 @@ MODEL:
         USE_ABSLOTE_XYZ: True
         USE_NORM: True
         NUM_FILTERS: [128, 128]
+        # === 新增：类别筛选配置（使用类别名称而非索引）===
+        # 可选配置，如果不设置或设为空列表，则使用所有类别
+        # 可用的nuScenes类别名称：
+        # ['car', 'truck', 'construction_vehicle', 'bus', 'trailer',
+        #  'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
+        TARGET_CLASS_NAMES: [ 'car', 'pedestrian', 'bicycle' ]  # 只对这三类生成前景地图
+
 
     BACKBONE_3D:
         # === 更改BACKBONE_3D ===
@@ -132,7 +135,7 @@ MODEL:
               linear_end: 0.02
               num_diffusion_timesteps: 5
           DIFF_LOSS_CFG:
-            enable: True
+            enable: False
             origin_weight: 0.9998
             fuse_weight: 0.0002
 
