@@ -10,7 +10,7 @@ from .spconv_backbone_voxelnext2d import VoxelResBackBone8xVoxelNeXt2D
 from .spconv_backbone_sed import HEDNet
 from .hednet import SparseHEDNet, SparseHEDNet2D
 from .lion_backbone_one_stride import LION3DBackboneOneStride, LION3DBackboneOneStride_Sparse
-from .zzx_lion_backbone_one_stride import LION3DBackboneOneStride as ZZXDF_LION
+from .FEDM_backbone_one_stride import LION3DBackboneOneStride as ZZXDF_LION
 
 __all__ = {
     'VoxelBackBone8x': VoxelBackBone8x,
