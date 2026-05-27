@@ -1,0 +1,270 @@
+CLASS_NAMES: ['car','truck', 'construction_vehicle', 'bus', 'trailer',
+              'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
+
+DATA_CONFIG:
+  _BASE_CONFIG_: cfgs/dataset_configs/nuscenes_dataset.yaml
+
+  BALANCED_RESAMPLING: False # not use CBGS!!!
+
+  POINT_CLOUD_RANGE: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+  DATA_AUGMENTOR:
+    DISABLE_AUG_LIST: ['placeholder']
+    AUG_CONFIG_LIST:
+      - NAME: gt_sampling
+        USE_ROAD_PLANE: False
+        DB_INFO_PATH:
+          - nuscenes_dbinfos_10sweeps_withvelo.pkl
+
+        PREPARE: {
+          filter_by_min_points: [
+              'car:5','truck:5', 'construction_vehicle:5', 'bus:5', 'trailer:5',
+              'barrier:5', 'motorcycle:5', 'bicycle:5', 'pedestrian:5', 'traffic_cone:5'
+          ],
+        }
+
+        SAMPLE_GROUPS: [
+          'car:2','truck:3', 'construction_vehicle:7', 'bus:4', 'trailer:6',
+          'barrier:2', 'motorcycle:6', 'bicycle:6', 'pedestrian:2', 'traffic_cone:2'
+        ]
+        NUM_POINT_FEATURES: 5
+        DATABASE_WITH_FAKELIDAR: False
+        REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
+        LIMIT_WHOLE_SCENE: True
+
+      - NAME: random_world_flip
+        ALONG_AXIS_LIST: ['x', 'y']
+
+      - NAME: random_world_rotation
+        WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+
+      - NAME: random_world_scaling
+        WORLD_SCALE_RANGE: [0.9, 1.1]
+
+      - NAME: random_world_translation
+        NOISE_TRANSLATE_STD: [0.5, 0.5, 0.5]
+
+  DATA_PROCESSOR:
+    -   NAME: mask_points_and_boxes_outside_range
+        REMOVE_OUTSIDE_BOXES: True
+        MASK_Z: True
+
+    -   NAME: shuffle_points
+        SHUFFLE_ENABLED: {
+          'train': True,
+          'test': True
+        }
+
+    -   NAME: transform_points_to_voxels_placeholder
+        VOXEL_SIZE: [0.3, 0.3, 0.25]
+
+
+MODEL:
+    # === 更改detector ===
+    NAME: FEDM_TransFusion
+
+    VFE:
+        # === 更改VFE ===
+        NAME: FEDM_VFE
+        WITH_DISTANCE: False
+        USE_ABSLOTE_XYZ: True
+        USE_NORM: True
+        NUM_FILTERS: [128, 128]
+        # === 新增：类别筛选配置（使用类别名称而非索引）===
+        # 可选配置，如果不设置或设为空列表，则使用所有类别
+        # 可用的nuScenes类别名称：
+        # ['car', 'truck', 'construction_vehicle', 'bus', 'trailer',
+        #  'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
+        TARGET_CLASS_NAMES: ['car', 'truck', 'construction_vehicle', 'bus', 'trailer',
+                             'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
+
+
+    BACKBONE_3D:
+        # === 更改BACKBONE_3D ===
+        NAME: FEDM_LION
+        FEATURE_DIM: 128
+        LAYER_DIM: [128, 128, 128, 128]
+        NUM_LAYERS: 4
+        DEPTHS: [2, 2, 2, 2]
+        LAYER_DOWN_SCALES: [[[2, 2, 2], [2, 2, 2]], [[2, 2, 2], [2, 2, 2]], [[2, 2, 2], [2, 2, 2]], [[2, 2, 2], [2, 2, 2]]]
+        WINDOW_SHAPE: [[13, 13, 32], [13, 13, 16], [13, 13, 8], [13, 13, 4]]
+        GROUP_SIZE: [4096, 2048, 1024, 512]
+        DIRECTION: ['x', 'y']
+        DIFF_SCALE: 0.2
+        DIFFUSION:  [True, True, True, True] # 手动扩散全开，第0层保底
+        SHIFT: True
+        OPERATOR:
+          NAME: 'Mamba'
+          CFG:
+            d_state: 16
+            d_conv: 4
+            expand: 2
+            drop_path: 0.2
+
+        DIFF_MODEL:
+          ENABLE: True # 扩散模型总控
+          LEVEL: [ True, False, False, False ] # 仅第0层启用扩散模型，对齐KITTI经验
+          PRIORITY: [ True, True, True, True ] # 扩散模型优先于手动扩散
+          LATENT:
+            voxel_feature_dim: 128
+            voxel_latent_dim: 32
+            # 恢复nuScenes验证有效的空间压缩策略：XY下采样降低MLP独立去噪的不一致性，Z轴8倍下采样减少计算
+            latent_down_scale: [ [ 2, 2, 8 ], [ 2, 2, 4 ], [ 2, 2, 2 ], [ 2, 2, 1 ] ]
+          DIFF_PROCESS:
+            diff_noise_scale: 1.0
+            diff_residual_scale: 0.5         # nuScenes修正：大目标需要更强扩散信号，0.5为保守与激进的折中
+          DIFF_MODEL_CFG: # 扩散模型内部具体配置
+            adapter_enable: True             # 是否启用噪声适配器
+            use_mixed_as_start: True         # 使用混合特征作为扩散起始点，消除train-eval gap
+            adapter_weighted_loss: False     # 是否在损失计算中使用适配器权重加权
+
+            # 噪声适配器配置（按128/64=2倍缩放隐藏层，其余对齐KITTI）
+            latent_noise_adapter:
+              use_residual: True           # 是否使用残差结构
+              residual_skip: True          # 是否使用跳跃连接
+              hidden_dims: [ 64, 32 ]      # 2x KITTI [32,16]，适配128维输入
+              dropout: 0.2                 # KITTI验证值，增强正则化
+              min_weight: 0.5              # nuScenes修正：降低下限，给扩散模型更多生成空间
+              max_weight: 0.8              # nuScenes修正：降低上限，避免完全保留原始特征
+              temperature: 1.0             # KITTI验证值
+
+            # 推断网络配置（按128/64=2倍缩放维度）
+            inference_net:
+              # 基础网络参数
+              in_channels: 32          # 等于voxel_latent_dim
+              out_channels: 32         # 等于voxel_latent_dim
+              base_channels: 32        # KITTI:16→nuScenes:32，与时间步嵌入表达能力匹配
+              temb_coefficient: 2      # 时间步嵌入维度系数
+
+              # 残差MLP配置
+              block_type: 'gated' # 'gated' 'residual' 'sequential'
+              use_residual: True       # 是否启用残差结构
+              residual_skip: True      # 是否使用跳跃连接
+              mlp_dims: [ 256, 128, 64 ]    # nuScenes修正：3层深度网络，建模128维复杂特征分布与大目标空间一致性
+              dropout: 0.2             # KITTI验证值
+
+              # 位置引导配置
+              use_pos_guide: True      # 是否使用位置坐标引导
+              pos_embed_dim: 8         # 位置编码维度
+              pos_guide_strength: 0.4  # nuScenes修正：略增位置引导，补偿MLP缺乏的跨体素卷积
+            diffusion:
+              beta_schedule: linear    # 噪声调度类型
+              linear_start: 0.001      # KITTI验证值：降低初始噪声
+              linear_end: 0.01         # KITTI验证值：降低最终噪声
+              num_diffusion_timesteps: 10  # KITTI验证值
+          DIFF_LOSS_CFG:
+            enable: True
+            weight_mode: 'manual'        # 手动固定加权模式（与SECONDNet对齐）
+            origin_weight: 1.0           # KITTI验证值：检测损失权重
+            fuse_weight: 0.01            # KITTI验证值：扩散损失占比约1%，保证有效梯度
+
+
+    MAP_TO_BEV:
+        NAME: HeightCompression
+        NUM_BEV_FEATURES: 256
+
+    BACKBONE_2D:
+        NAME: BaseBEVResBackbone
+        LAYER_NUMS: [ 1, 2, 2 ]
+        LAYER_STRIDES: [ 1, 2, 2 ]
+        NUM_FILTERS: [ 128, 128, 256 ]
+        UPSAMPLE_STRIDES: [ 0.5, 1, 2 ]
+        NUM_UPSAMPLE_FILTERS: [ 128, 128, 128 ]
+
+
+    DENSE_HEAD:
+        CLASS_AGNOSTIC: False
+        NAME: TransFusionHead
+
+        USE_BIAS_BEFORE_NORM: False
+
+        NUM_PROPOSALS: 200
+        HIDDEN_CHANNEL: 128
+        NUM_CLASSES: 10
+        NUM_HEADS: 8
+        NMS_KERNEL_SIZE: 3
+        FFN_CHANNEL: 256
+        DROPOUT: 0
+        BN_MOMENTUM: 0.1
+        ACTIVATION: relu
+
+        NUM_HM_CONV: 2
+        SEPARATE_HEAD_CFG:
+            HEAD_ORDER: [ 'center', 'height', 'dim', 'rot', 'vel' ]
+            HEAD_DICT: {
+                'center': { 'out_channels': 2, 'num_conv': 2 },
+                'height': { 'out_channels': 1, 'num_conv': 2 },
+                'dim': { 'out_channels': 3, 'num_conv': 2 },
+                'rot': { 'out_channels': 2, 'num_conv': 2 },
+                'vel': { 'out_channels': 2, 'num_conv': 2 },
+                'iou': { 'out_channels': 1, 'num_conv': 2 },
+
+            }
+
+        TARGET_ASSIGNER_CONFIG:
+            FEATURE_MAP_STRIDE: 2
+            DATASET: nuScenes
+            GAUSSIAN_OVERLAP: 0.1
+            MIN_RADIUS: 2
+            HUNGARIAN_ASSIGNER:
+                cls_cost: { 'gamma': 2.0, 'alpha': 0.25, 'weight': 0.15 }
+                reg_cost: { 'weight': 0.25 }
+                iou_cost: { 'weight': 0.25 }
+
+        LOSS_CONFIG:
+            LOSS_WEIGHTS: {
+                'cls_weight': 1.0,
+                'bbox_weight': 0.25,
+                'hm_weight': 1.0,
+                'loss_iou_rescore_weight': 0.5,
+                'code_weights': [ 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2 ]
+            }
+            LOSS_CLS:
+                use_sigmoid: True
+                gamma: 2.0
+                alpha: 0.25
+
+        POST_PROCESSING:
+            SCORE_THRESH: 0.0
+            POST_CENTER_RANGE: [ -61.2, -61.2, -10.0, 61.2, 61.2, 10.0 ]
+            USE_IOU_TO_RECTIFY_SCORE: True
+            IOU_RECTIFIER: [ 0.5 ]
+            NMS_CONFIG:
+                NMS_TYPE: nms_gpu
+                NMS_THRESH: 0.2
+                NMS_PRE_MAXSIZE: 1000
+                NMS_POST_MAXSIZE: 100
+                SCORE_THRES: 0.
+
+    POST_PROCESSING:
+        RECALL_THRESH_LIST: [ 0.3, 0.5, 0.7 ]
+        SCORE_THRESH: 0.1
+        OUTPUT_RAW_SCORE: False
+        EVAL_METRIC: kitti
+
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 2 #4
+    NUM_EPOCHS: 36 #20
+
+    OPTIMIZER: adam_onecycle
+    LR: 0.003
+    WEIGHT_DECAY: 0.05
+    MOMENTUM: 0.9
+
+    MOMS: [ 0.95, 0.85 ]
+    PCT_START: 0.4
+    DIV_FACTOR: 10
+    DECAY_STEP_LIST: [ 35, 45 ]
+    LR_DECAY: 0.1
+    LR_CLIP: 0.0000001
+
+    LR_WARMUP: False
+    WARMUP_EPOCH: 1
+
+    GRAD_NORM_CLIP: 35
+    LOSS_SCALE_FP16: 4.0
+
+HOOK:
+    DisableAugmentationHook:
+        DISABLE_AUG_LIST: ['gt_sampling']
+        NUM_LAST_EPOCHS: 4

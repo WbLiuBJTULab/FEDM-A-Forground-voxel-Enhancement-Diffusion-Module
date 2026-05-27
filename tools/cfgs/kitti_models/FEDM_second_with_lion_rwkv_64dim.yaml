@@ -1,0 +1,253 @@
+CLASS_NAMES: ['Car', 'Pedestrian', 'Cyclist']
+
+DATA_CONFIG:
+  _BASE_CONFIG_: cfgs/dataset_configs/kitti_dataset.yaml
+  POINT_CLOUD_RANGE: [0, -40, -3, 70.4, 40, 1]
+  DATA_AUGMENTOR:
+    DISABLE_AUG_LIST: ['placeholder']
+    AUG_CONFIG_LIST:
+      - NAME: gt_sampling
+        USE_ROAD_PLANE: True # True
+        DB_INFO_PATH:
+          - kitti_dbinfos_train.pkl
+        PREPARE: {
+          filter_by_min_points: ['Car:5', 'Pedestrian:5', 'Cyclist:5'],
+          filter_by_difficulty: [-1],
+        }
+
+        SAMPLE_GROUPS: ['Car:15','Pedestrian:10', 'Cyclist:10']
+        NUM_POINT_FEATURES: 4
+        DATABASE_WITH_FAKELIDAR: False
+        REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
+        LIMIT_WHOLE_SCENE: False
+
+      - NAME: random_world_flip
+        ALONG_AXIS_LIST: ['x']
+
+      - NAME: random_world_rotation
+        WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+
+      - NAME: random_world_scaling
+        WORLD_SCALE_RANGE: [0.95, 1.05]
+
+  DATA_PROCESSOR:
+    - NAME: mask_points_and_boxes_outside_range
+      REMOVE_OUTSIDE_BOXES: True
+
+    - NAME: shuffle_points
+      SHUFFLE_ENABLED: {
+        'train': True,
+        'test': False
+      }
+
+    - NAME: transform_points_to_voxels
+      VOXEL_SIZE: [ 0.2, 0.2, 0.125]
+      MAX_POINTS_PER_VOXEL: 5
+      MAX_NUMBER_OF_VOXELS: {
+        'train': 16000,
+        'test': 40000
+      }
+
+
+MODEL:
+  # === 更改detector ===
+  NAME: FEDM_SECONDNet
+
+  VFE:
+    # === 更改VFE ===
+    NAME: FEDM_VFE
+    WITH_DISTANCE: False
+    USE_ABSLOTE_XYZ: True
+    USE_NORM: True
+    NUM_FILTERS: [64, 64]
+    TARGET_CLASS_NAMES: [  ]  # 只对这三类生成前景地图
+
+  BACKBONE_3D:
+    NAME: FEDM_LION
+    FEATURE_DIM: 64
+    LAYER_DIM: [64, 64, 64, 64]
+    NUM_LAYERS: 4
+    DEPTHS: [2, 2, 2, 2]
+    LAYER_DOWN_SCALES: [ [ [ 2, 2, 2 ], [ 2, 2, 2 ] ], [ [ 2, 2, 2 ], [ 2, 2, 2 ] ], [ [ 2, 2, 2 ], [ 2, 2, 2 ] ], [ [ 2, 2, 2 ], [ 2, 2, 2 ] ] ]
+    WINDOW_SHAPE: [ [ 13, 13, 32 ], [ 13, 13, 16 ], [ 13, 13, 8 ], [ 13, 13, 4 ] ]
+    GROUP_SIZE: [ 4096, 2048, 1024, 512 ]
+    DIRECTION: [ 'x', 'y' ]
+    DIFF_SCALE: 0.2
+    DIFFUSION: [True, True, True, True] # 恢复手动扩散，同时保留扩散模型
+    SHIFT: True
+    OPERATOR:
+      NAME: 'RWKV'
+      CFG:
+        n_head: 4
+        shift_pixel: 1
+        shift_mode: 'time_shift'
+        hidden_rate: 4
+        drop_path: 0.2 #0.0 #0.2 #0
+        init_mode: 'fancy'
+        with_cp: True             # True ← 唯一最关键修改
+        init_values: 0.00001      # ← 从 0.00001 提高 100 倍
+
+    DIFF_MODEL:
+      ENABLE: True #扩散模型总控
+      LEVEL: [ True, False, False, False ] #是否各层是否启用扩散模型
+      PRIORITY: [ True, True, True, True ] #是否先于手动扩散处理
+      LATENT:
+        voxel_feature_dim: 64
+        voxel_latent_dim: 16
+        # [[2, 2, 8], [2, 2, 4], [2, 2, 2], [2, 2, 1]]
+        latent_down_scale: [ [ 1, 1, 4 ], [ 1, 1, 4 ], [ 1, 1, 2 ], [ 1, 1, 1 ] ]
+      DIFF_PROCESS:
+        diff_noise_scale: 1.0
+        diff_residual_scale: 0.1
+      DIFF_MODEL_CFG: # 扩散模型内部具体配置
+        adapter_enable: True
+        use_mixed_as_start: True
+        adapter_weighted_loss: False
+
+        # 噪声适配器配置
+        latent_noise_adapter:
+          use_residual: True
+          residual_skip: True
+          hidden_dims: [32, 16]
+          dropout: 0.2
+          min_weight: 0.3
+          max_weight: 0.6
+          temperature: 1.0
+
+        # 推断网络配置
+        inference_net:
+          # 基础网络参数
+          in_channels: 16
+          out_channels: 16
+          base_channels: 16
+          temb_coefficient: 2
+
+          # 残差MLP配置
+          block_type: 'residual' # 'gated' 'residual' 'sequential'
+          use_residual: True
+          residual_skip: True
+          mlp_dims: [64, 32]
+          dropout: 0.3
+
+          # 位置引导配置
+          use_pos_guide: True
+          pos_embed_dim: 8
+          pos_guide_strength: 0.05
+        diffusion:
+          beta_schedule: linear
+          linear_start: 0.001
+          linear_end: 0.01
+          num_diffusion_timesteps: 10
+      DIFF_LOSS_CFG:
+        enable: True
+        weight_mode: 'manual'
+        origin_weight: 1.0
+        fuse_weight: 0.01
+
+
+  MAP_TO_BEV:
+    NAME: HeightCompression
+    NUM_BEV_FEATURES: 128 #256
+
+  BACKBONE_2D:
+    NAME: BaseBEVBackbone
+
+    LAYER_NUMS: [5, 5]
+    LAYER_STRIDES: [1, 2]
+    NUM_FILTERS: [128, 256]
+    UPSAMPLE_STRIDES: [1, 2]
+    NUM_UPSAMPLE_FILTERS: [256, 256]
+
+  DENSE_HEAD:
+    NAME: AnchorHeadSingle
+    CLASS_AGNOSTIC: False
+
+    USE_DIRECTION_CLASSIFIER: True
+    DIR_OFFSET: 0.78539
+    DIR_LIMIT_OFFSET: 0.0
+    NUM_DIR_BINS: 2
+
+    ANCHOR_GENERATOR_CONFIG: [
+      {
+        'class_name': 'Car',
+        'anchor_sizes': [[3.9, 1.6, 1.56]],
+        'anchor_rotations': [0, 1.57],
+        'anchor_bottom_heights': [-1.78],
+        'align_center': False,
+        'feature_map_stride': 1,
+        'matched_threshold': 0.6,
+        'unmatched_threshold': 0.45
+      },
+      {
+        'class_name': 'Pedestrian',
+        'anchor_sizes': [[0.8, 0.6, 1.73]],
+        'anchor_rotations': [0, 1.57],
+        'anchor_bottom_heights': [-0.6],
+        'align_center': False,
+        'feature_map_stride': 1,
+        'matched_threshold': 0.5,
+        'unmatched_threshold': 0.35
+      },
+      {
+        'class_name': 'Cyclist',
+        'anchor_sizes': [[1.76, 0.6, 1.73]],
+        'anchor_rotations': [0, 1.57],
+        'anchor_bottom_heights': [-0.6],
+        'align_center': False,
+        'feature_map_stride': 1,
+        'matched_threshold': 0.5,
+        'unmatched_threshold': 0.35
+      }
+    ]
+
+    TARGET_ASSIGNER_CONFIG:
+      NAME: AxisAlignedTargetAssigner
+      POS_FRACTION: -1.0
+      SAMPLE_SIZE: 512
+      NORM_BY_NUM_EXAMPLES: False
+      MATCH_HEIGHT: False
+      BOX_CODER: ResidualCoder
+
+    LOSS_CONFIG:
+      LOSS_WEIGHTS: {
+        'cls_weight': 1.0,
+        'loc_weight': 2.0,
+        'dir_weight': 0.2,
+        'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      }
+
+  POST_PROCESSING:
+    RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
+    SCORE_THRESH: 0.1
+    OUTPUT_RAW_SCORE: False
+
+    EVAL_METRIC: kitti
+
+    NMS_CONFIG:
+      MULTI_CLASSES_NMS: False
+      NMS_TYPE: nms_gpu
+      NMS_THRESH: 0.01
+      NMS_PRE_MAXSIZE: 4096
+      NMS_POST_MAXSIZE: 500
+
+
+OPTIMIZATION:
+  BATCH_SIZE_PER_GPU: 4
+  NUM_EPOCHS: 80
+
+  OPTIMIZER: adam_onecycle
+  LR: 0.003
+  WEIGHT_DECAY: 0.01
+  MOMENTUM: 0.9
+
+  MOMS: [0.95, 0.85]
+  PCT_START: 0.4
+  DIV_FACTOR: 10
+  DECAY_STEP_LIST: [35, 45]
+  LR_DECAY: 0.1
+  LR_CLIP: 0.0000001
+
+  LR_WARMUP: False
+  WARMUP_EPOCH: 1
+
+  GRAD_NORM_CLIP: 10

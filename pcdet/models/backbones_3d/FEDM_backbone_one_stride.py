@@ -723,7 +723,7 @@ class PositionEmbeddingLearned(nn.Module):
         super().__init__()
         self.position_embedding_head = nn.Sequential(
             nn.Linear(input_channel, num_pos_feats),
-            nn.BatchNorm1d(num_pos_feats),
+            nn.LayerNorm(num_pos_feats),
             nn.ReLU(inplace=True),
             nn.Linear(num_pos_feats, num_pos_feats))
 
@@ -1046,7 +1046,7 @@ class LION3DBackboneOneStride(nn.Module):
             match_mask = [coord in x.indices for coord in voxel_reference_coords]
             print(f"linear_1，匹配坐标数量: {sum(match_mask)}")
 
-        total_diffusion_loss = 0.0
+        total_diffusion_loss = torch.tensor(0.0, device=voxel_features.device, dtype=voxel_features.dtype)
 
         x1, _ , fill_coords1, reference_coords1, diffusion_losses1 = self.dow1(
             x,

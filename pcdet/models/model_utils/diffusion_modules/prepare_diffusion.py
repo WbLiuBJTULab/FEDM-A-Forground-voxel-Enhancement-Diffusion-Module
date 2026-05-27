@@ -22,6 +22,8 @@ class NoiseLevelAdapter(nn.Module):
     1. 复用ResidualMLPBlock结构
     2. 输出权重向量（每个特征维度独立调整）
     3. 实现可学习的噪声混合
+    
+    修改：BatchNorm1d -> LayerNorm
     """
 
     def __init__(self, latent_dim=16, config=None):
@@ -57,7 +59,7 @@ class NoiseLevelAdapter(nn.Module):
             else:
                 layers.extend([
                     nn.Linear(input_dim, hidden_dim),
-                    nn.BatchNorm1d(hidden_dim),
+                    nn.LayerNorm(hidden_dim),       # BatchNorm1d -> LayerNorm
                     nn.ReLU(),
                     nn.Dropout(self.dropout)
                 ])
@@ -71,26 +73,35 @@ class NoiseLevelAdapter(nn.Module):
 
         self.mlp = nn.Sequential(*layers)
 
+        self.pos_bias_proj = nn.Sequential(
+            nn.Linear(3, latent_dim),
+            nn.LayerNorm(latent_dim),
+            nn.SiLU(),
+            nn.Linear(latent_dim, latent_dim)
+        )
+
         # 调试开关
         self.debug_prefix = False
 
     def forward(self, latent_features, coords=None):
         """
         前向传播：计算噪声混合权重并应用
-
-        参数:
-            latent_features: 潜变量特征 [N, D]
-            coords: 坐标信息 [N, 4]（可选，用于位置引导）
-
-        返回:
-            mixed_latent: 混合后的特征 [N, D]
-            adapter_weight: 适配器权重 [N, D]
+        修改: 真正使用coords进行轻量位置感知调制
         """
+        # === NEW: 真正使用coords进行位置感知调制 ===
+        if coords is not None and hasattr(self, 'pos_bias_proj'):
+            # coords: [N,4] (batch,z,y,x) 或 [N,3]
+            coords_float = coords[:, -3:].float() if coords.shape[-1] >= 3 else coords.float()
+            pos_bias = self.pos_bias_proj(coords_float)  # [N, latent_dim]
+            latent_features = latent_features + pos_bias * 0.1  # 轻量调制，避免过约束
+
         # 计算权重向量
         raw_weight = self.mlp(latent_features)  # [N, D]
 
-        # 应用温度参数
+        # 应用温度参数（增加数值稳定性，防止logit溢出）
         if self.temperature != 1.0:
+            eps = 1e-4
+            raw_weight = torch.clamp(raw_weight, eps, 1.0 - eps)
             raw_weight = torch.sigmoid(torch.logit(raw_weight) / self.temperature)
 
         # 权重范围约束
@@ -109,6 +120,7 @@ class NoiseLevelAdapter(nn.Module):
             print(f"[NoiseLevelAdapter] 权重范围: [{adapter_weight.min().item():.3f}, {adapter_weight.max().item():.3f}]")
 
         return mixed_latent, adapter_weight
+
 
 
 # 在 prepare_diffusion.py 中添加新的匹配算法
@@ -534,13 +546,18 @@ class SimpleVoxelExpanding(nn.Module):
         upsampled_data = torch.gather(lower_data, 0, unq_inv.unsqueeze(1).repeat(1, lower_data.shape[1]))
         return upsampled_data
 
-class DiffusionModelManager:
+class DiffusionModelManager(nn.Module):
     """
     管理扩散模型的训练流程
     包括训练/推断模式切换、梯度控制、损失计算等
+    
+    修改：
+    1. 新增 diff_residual_scale 门控残差系数
+    2. 残差连接改为门控形式，防止扩散特征被原始特征淹没
     """
 
     def __init__(self, diff_model):
+        super().__init__()
 
         self.adapter_enable = getattr(diff_model.DIFF_MODEL_CFG, 'adapter_enable', True)
         self.use_mixed_as_start = getattr(diff_model.DIFF_MODEL_CFG, 'use_mixed_as_start', True)
@@ -549,6 +566,9 @@ class DiffusionModelManager:
 
         self.voxel_feature_dim_cfg = getattr(diff_model.LATENT, 'voxel_feature_dim', 64)
         self.voxel_latent_dim_cfg = getattr(diff_model.LATENT, 'voxel_latent_dim', 16)
+
+        # 新增：读取门控残差缩放系数（默认1.0保持原行为，建议0.3）
+        self.diff_residual_scale = getattr(diff_model.DIFF_PROCESS, 'diff_residual_scale', 1.0)
 
         self.voxel_downsampler = SimpleVoxelMerging()
 
@@ -682,8 +702,9 @@ class DiffusionModelManager:
             enhanced_latent_up = self.voxel_upsampler(lower_data=enhanced_latent, unq_inv=unq_inv)
             enhanced_voxel = self.latent_decoder(enhanced_latent_up)
 
-            # 残差连接
-            enhanced_voxel = enhanced_voxel + bs_voxel_features
+            # 修改：门控残差连接，防止扩散特征被原始特征淹没
+            enhanced_voxel = torch.clamp(enhanced_voxel, min=-50.0, max=50.0)
+            enhanced_voxel = self.diff_residual_scale * enhanced_voxel + bs_voxel_features
 
             return enhanced_voxel, diffusion_loss
 
@@ -732,7 +753,8 @@ class DiffusionModelManager:
                 enhanced_latent_up = self.voxel_upsampler(lower_data=enhanced_latent, unq_inv=unq_inv)
                 enhanced_voxel = self.latent_decoder(enhanced_latent_up)
 
-                # 残差连接
-                enhanced_voxel = enhanced_voxel + bs_voxel_features
+                # 修改：门控残差连接
+                enhanced_voxel = torch.clamp(enhanced_voxel, min=-50.0, max=50.0)
+                enhanced_voxel = self.diff_residual_scale * enhanced_voxel + bs_voxel_features
 
             return enhanced_voxel, 0.0

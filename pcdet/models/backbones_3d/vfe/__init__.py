@@ -5,7 +5,7 @@ from .dynamic_pillar_vfe import DynamicPillarVFE, DynamicPillarVFE_3d,DynamicPil
 from .image_vfe import ImageVFE
 from .vfe_template import VFETemplate
 from .dynamic_voxel_vfe import DynamicVoxelVFE
-from .zzx_dynamic_voxel_vfe import DynamicVoxelVFE_ForGtMap
+from .FEDM_dynamic_voxel_vfe import DynamicVoxelVFE_ForGtMap as FEDM_VFE
 
 __all__ = {
     'VFETemplate': VFETemplate,
@@ -18,5 +18,5 @@ __all__ = {
     'DynPillarVFE3D': DynamicPillarVFE_3d,
     'DynamicPillarVFESimple2D': DynamicPillarVFESimple2D,
     'DynamicVoxelVFE': DynamicVoxelVFE,
-    'ZZXDF_VFE': DynamicVoxelVFE_ForGtMap
+    'FEDM_VFE': FEDM_VFE
 }

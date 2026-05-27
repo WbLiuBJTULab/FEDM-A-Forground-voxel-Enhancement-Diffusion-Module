@@ -78,7 +78,8 @@ class Cond_Diff_Denoise(nn.Module):
 
         self.denoiser = Diffusion_MLPs(config.inference_net)
         self.use_pos_guide = getattr(model_cfg.inference_net, 'use_pos_guide', True)
-        self.pos_guide_strength = (model_cfg.inference_net, 'pos_guide_strength', 0.5)
+        # 修复：原代码误创建元组，改为正确的getattr读取
+        self.pos_guide_strength = getattr(model_cfg.inference_net, 'pos_guide_strength', 0.5)
 
         # q sampling
         betas = make_beta_schedule(beta_schedule, timesteps, linear_start=linear_start, linear_end=linear_end)
@@ -311,65 +312,55 @@ class Cond_Diff_Denoise(nn.Module):
             return self._forward_inference(data_dict)
 
     def _forward_train(self, data_dict):
-        """训练模式前向传播"""
+        """训练模式前向传播
+        修改: 改为标准单步DDPM训练，随机采样t，单步加噪/预测，返回x0估计
+        """
         gt_mask_latent = data_dict['gt_mask_latent']
         bs_voxel_latent = data_dict['bs_voxel_latent']
 
-        # 组合坐标信息
-        if self.use_pos_guide:
-            coords_condition = data_dict['gt_mask_coords']
-        else:
-            coords_condition = None
+        coords_condition = data_dict['bs_voxel_coords'] if self.use_pos_guide else None
 
         if self.debug_prefix:
             print(f"训练模式 - 条件特征: {bs_voxel_latent.shape}")
             print(f"训练模式 - 目标特征: {gt_mask_latent.shape}")
 
-        x = bs_voxel_latent
-        x_start = gt_mask_latent
+        x = bs_voxel_latent          # 条件特征
+        x_start = gt_mask_latent     # 目标特征（前景mask）
+        b = x_start.shape[0]
 
-        # 训练时始终使用真实噪声
-        t = torch.full((x.shape[0],), self.num_timesteps - 1, device=x.device, dtype=torch.long)
+        # === MODIFIED: 随机采样单步时间步，替代固定T-1的链式训练 ===
+        t = torch.randint(1, self.num_timesteps, (b,), device=x.device).long()
+
+        # 生成标准高斯噪声
         noise = torch.randn_like(x_start)
-        true_noise = noise
-        _x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
 
-        if self.debug_prefix and self.use_noise_adapter:
-            print(f"训练模式 - 使用噪声适配器: {self.use_noise_adapter}")
-            print(f"训练模式 - 使用真实噪声作为起始点")
+        # 单步前向加噪
+        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
 
-        noisy_masks = _x_noisy
+        # 单步去噪预测
+        model_out = self.gen_pred(x, x_noisy, coords=coords_condition, t=t)
 
-        # 扩散循环
-        predicted_noises = []
-        for _t in reversed(range(1, self.num_timesteps)):
-            _t = torch.full((x.shape[0],), _t, device=x.device, dtype=torch.long)
-            noisy_masks, pred_noise = self.p_sample(x, noisy_masks, _t, upsam=False, coords=coords_condition)
-            predicted_noises.append(pred_noise)
-
-        _t = 0
-        _t = torch.full((x.shape[0],), _t, device=x.device, dtype=torch.long)
-        noisy_masks, pred_noise = self.p_sample(x, noisy_masks, _t, upsam=True, coords=coords_condition)
-        predicted_noises.append(pred_noise)
+        # 根据参数化方式确定监督目标与增强特征
+        if self.parameterization == "eps":
+            target = noise
+            # 返回去噪后的起点作为增强特征，使梯度有效回流到主网络
+            enhanced_features = self.predict_start_from_noise(x_noisy, t, model_out)
+        elif self.parameterization == "x0":
+            target = x_start
+            enhanced_features = model_out
+        else:
+            raise NotImplementedError(f"不支持的参数化: {self.parameterization}")
 
         # 损失计算
         if self.adapter_weighted_loss and 'adapter_weight' in data_dict:
-            # 使用适配器权重加权的损失
             adapter_weight = data_dict['adapter_weight']
-            total_loss = 0
-            for pred in predicted_noises:
-                loss = F.mse_loss(pred, true_noise, reduction='none')
-                weighted_loss = (loss * adapter_weight).mean()
-                total_loss += weighted_loss
-            loss = total_loss / len(predicted_noises)
+            loss = F.mse_loss(model_out, target, reduction='none')
+            loss = (loss * adapter_weight).mean()
         else:
-            # 标准损失计算
-            total_loss = sum([self.compute_diff_loss(pred, true_noise)
-                              for pred in predicted_noises])
-            loss = total_loss / len(predicted_noises)
+            loss = self.compute_diff_loss(model_out, target, loss_type=self.loss_type)
 
-        enhanced_features = noisy_masks
         return enhanced_features, loss
+
 
     def _forward_inference(self, data_dict):
         """推断模式前向传播"""

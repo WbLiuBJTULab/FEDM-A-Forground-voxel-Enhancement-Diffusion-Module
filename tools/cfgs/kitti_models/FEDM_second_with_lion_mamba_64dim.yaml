@@ -7,7 +7,7 @@ DATA_CONFIG:
         DISABLE_AUG_LIST: ['placeholder']
         AUG_CONFIG_LIST:
             - NAME: gt_sampling
-              USE_ROAD_PLANE: False # True
+              USE_ROAD_PLANE: True
               DB_INFO_PATH:
                   - kitti_dbinfos_train.pkl
               PREPARE: {
@@ -50,17 +50,17 @@ DATA_CONFIG:
 
 
 MODEL:
-    NAME: SECONDNet
+    NAME: FEDM_SECONDNet
 
     VFE:
-        NAME: DynamicVoxelVFE
+        NAME: FEDM_VFE
         WITH_DISTANCE: False
         USE_ABSLOTE_XYZ: True
         USE_NORM: True
         NUM_FILTERS: [64, 64]
 
     BACKBONE_3D:
-        NAME: LION3DBackboneOneStride
+        NAME: FEDM_LION
         FEATURE_DIM: 64
         LAYER_DIM: [64, 64, 64, 64]
         NUM_LAYERS: 4
@@ -70,7 +70,7 @@ MODEL:
         GROUP_SIZE: [4096, 2048, 1024, 512] 
         DIRECTION: ['x', 'y']
         DIFF_SCALE: 0.2
-        DIFFUSION:  True #False #True
+        DIFFUSION:  [False, True, True, True] # 关闭手动扩散，仅保留扩散模型
         SHIFT: True
         OPERATOR:
             NAME: 'Mamba'
@@ -79,6 +79,65 @@ MODEL:
                 d_conv: 4
                 expand: 2
                 drop_path: 0.2
+
+        DIFF_MODEL:
+            ENABLE: True #扩散模型总控
+            LEVEL: [True, False, False, False] #是否各层是否启用扩散模型
+            PRIORITY: [True, True, True, True] #是否先于手动扩散处理
+            LATENT:
+                voxel_feature_dim: 64
+                voxel_latent_dim: 16
+                # Z轴第0层从8倍改为4倍，保留更多高度结构
+                latent_down_scale: [[1, 1, 4], [1, 1, 4], [1, 1, 2], [1, 1, 1]]
+            DIFF_PROCESS:
+                diff_noise_scale: 1.0
+                diff_residual_scale: 0.2         # 前景增强信任度（0=完全信任原始场景，1=完全替换为扩散前景）
+            DIFF_MODEL_CFG:                      # 扩散模型内部具体配置
+                adapter_enable: True             # 是否启用噪声适配器
+                use_mixed_as_start: True         # False:推断用纯噪声起点，消除train-eval gap
+                adapter_weighted_loss: False     # 是否在损失计算中使用适配器权重加权
+
+                # 噪声适配器配置
+                latent_noise_adapter:
+                    use_residual: True           # 是否使用残差结构
+                    residual_skip: True          # 是否使用跳跃连接
+                    hidden_dims: [ 32, 16 ]      # 隐藏层维度
+                    dropout: 0.2                 # 0.1 -> 0.2，增强正则化
+                    min_weight: 0.7              # 0.3 -> 0.1，保留更多生成空间
+                    max_weight: 0.9             # 0.7 -> 0.5
+                    temperature: 1.0             # 1.0 -> 0.5，权重分布更尖锐
+
+                # 推断网络配置
+                inference_net:
+                    # 基础网络参数
+                    in_channels: 16          # 输入特征维度
+                    out_channels: 16         # 输出特征维度
+                    base_channels: 16        # 时间步嵌入基础维度
+                    temb_coefficient: 2      # 时间步嵌入维度系数
+
+                    # 残差MLP配置
+                    block_type: 'gated' # 'gated' 'residual' 'sequential'
+                    use_residual: True       # 是否启用残差结构
+                    residual_skip: True      # 是否使用跳跃连接
+                    mlp_dims: [ 64, 32 ] # [256,128,64] -> 减半，减少过拟合
+                    dropout: 0.2             # 0.1 -> 0.2
+
+                    # 位置引导配置
+                    use_pos_guide: True      # 是否使用位置坐标引导
+                    pos_embed_dim: 8         # 位置编码维度
+                    pos_guide_strength: 0.3   # 0.5 -> 0.3，避免位置过约束
+                diffusion:
+                    beta_schedule: linear    # 噪声调度类型
+                    linear_start: 0.001      # 0.2 -> 0.01，降低初始噪声
+                    linear_end: 0.01         # 0.4 -> 0.1，降低最终噪声
+                    num_diffusion_timesteps: 10  # 5
+            DIFF_LOSS_CFG:
+                enable: True
+                weight_mode: 'manual'        # 'uncertainty': 同方差不确定性自动加权; 'manual': 手动固定加权
+                origin_weight: 1.0           # manual模式：检测损失固定权重
+                fuse_weight: 0.01            # manual模式：扩散损失固定权重
+
+
 
     MAP_TO_BEV:
         NAME: HeightCompression
@@ -182,7 +241,8 @@ OPTIMIZATION:
     LR_DECAY: 0.1
     LR_CLIP: 0.0000001
 
-    LR_WARMUP: False
-    WARMUP_EPOCH: 1
+
+    LR_WARMUP: True
+    WARMUP_EPOCH: 2
 
     GRAD_NORM_CLIP: 10

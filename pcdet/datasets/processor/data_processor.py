@@ -153,88 +153,11 @@ class DataProcessor(object):
         data_dict['voxel_coords'] = coordinates
         data_dict['voxel_num_points'] = num_points
 
-        return data_dict
 
-    # 20250905 _代码修改 直接在data_processor中加入真值框地图的功能
-    # 20251010 _代码修改 修改以创建两个地图功能
-    # === 新增方法：真值框体素地图生成 ===
-    def generate_gt_voxel_maps(self, data_dict=None, config=None):
-        """
-        生成两种真值框地图（兼容placeholder模式）：
-        1. gt_fill_coords: 基于网格坐标系的所有真值框体素坐标
-        2. gt_reference_coords: 基于点云体素化的真值框内体素坐标
-        """
-
-        if data_dict is None:
-            # 初始化阶段设置网格尺寸（与placeholder模式一致）
-            grid_size = (self.point_cloud_range[3:6] - self.point_cloud_range[0:3]) / np.array(config.VOXEL_SIZE)
-            self.grid_size = np.round(grid_size).astype(np.int64)
-            self.voxel_size = config.VOXEL_SIZE
-            return partial(self.generate_gt_voxel_maps, config=config)
-
-        # 仅在训练模式且有真值框时执行
-        if self.training and 'gt_boxes' in data_dict and len(data_dict['gt_boxes']) > 0:
-
-            # 1. 生成真值框填充地图（这部分与placeholder模式兼容）
-            # 创建网格坐标系中的所有体素坐标
-            z_coords = np.arange(0, self.grid_size[0])
-            y_coords = np.arange(0, self.grid_size[1])
-            x_coords = np.arange(0, self.grid_size[2])
-            zz, yy, xx = np.meshgrid(z_coords, y_coords, x_coords, indexing='ij')
-            all_voxel_coords = np.stack([zz.ravel(), yy.ravel(), xx.ravel()], axis=1)
-
-            # 将体素坐标转换为实际点云坐标（中心点）
-            voxel_centers = (all_voxel_coords + 0.5) * np.array(self.voxel_size) + np.array(self.point_cloud_range[:3])
-
-            gt_fill_coords = []
-            for box in data_dict['gt_boxes']:
-                geometric_box = box[:7]  # [x,y,z,dx,dy,dz,heading]
-                mask = box_utils.points_in_box_3d(voxel_centers, geometric_box)
-                inside_voxel_coords = all_voxel_coords[mask]
-                gt_fill_coords.extend(inside_voxel_coords)
-
-            # 2. 生成真值框参考地图（需要处理placeholder模式）
-            gt_reference_coords = []
-
-            # 检查是否已经存在体素坐标（KITTI模式）
-            if 'voxel_coords' in data_dict and data_dict['voxel_coords'] is not None:
-                # KITTI模式：使用已有的体素坐标
-                all_coordinates = data_dict['voxel_coords']
-            else:
-                # placeholder模式：临时生成体素坐标用于GT地图
-                if self.voxel_generator is None:
-                    self.voxel_generator = VoxelGeneratorWrapper(
-                        vsize_xyz=config.VOXEL_SIZE,
-                        coors_range_xyz=self.point_cloud_range,
-                        num_point_features=self.num_point_features,
-                        max_num_points_per_voxel=config.MAX_POINTS_PER_VOXEL,
-                        max_num_voxels=config.MAX_NUMBER_OF_VOXELS[self.mode],
-                    )
-
-                points = data_dict['points']
-                _, all_coordinates, _ = self.voxel_generator.generate(points)
-
-            # 处理坐标格式兼容性
-            if all_coordinates.shape[1] == 4:  # spconv v1: [batch_idx, z, y, x]
-                coords = all_coordinates[:, 1:4]
-            else:  # spconv v2: [z, y, x]
-                coords = all_coordinates[:, :3]
-
-            voxel_centers_ref = (coords + 0.5) * np.array(self.voxel_size) + np.array(self.point_cloud_range[:3])
-
-            for box in data_dict['gt_boxes']:
-                geometric_box = box[:7]
-                mask = box_utils.points_in_box_3d(voxel_centers_ref, geometric_box)
-                inside_voxel_coords = coords[mask]
-                gt_reference_coords.extend(inside_voxel_coords)
-
-            # 存储结果
-            data_dict['gt_fill_coords'] = np.array(gt_fill_coords, dtype=np.int32) \
-                if gt_fill_coords else np.zeros((0, 3), dtype=np.int32)
-            data_dict['gt_reference_coords'] = np.array(gt_reference_coords, dtype=np.int32) \
-                if gt_reference_coords else np.zeros((0, 3), dtype=np.int32)
 
         return data_dict
+
+    
     def sample_points(self, data_dict=None, config=None):
         if data_dict is None:
             return partial(self.sample_points, config=config)
